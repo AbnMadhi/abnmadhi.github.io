@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Value decryptor (AES-128-ECB)</title>
+<style>
+  body{background:#111418;color:#d7dde3;font-family:Consolas,Menlo,monospace;margin:0;padding:24px;}
+  h1{font-size:16px;color:#7ab0ff;margin:0 0 4px;}
+  .sub{color:#6d7883;font-size:12px;margin-bottom:18px;}
+  label{display:block;font-size:12px;color:#9aa7b2;margin:14px 0 4px;}
+  textarea,input{width:100%;box-sizing:border-box;background:#1a1f26;color:#d7dde3;border:1px solid #2c3540;border-radius:4px;padding:8px;font-family:inherit;font-size:12px;}
+  textarea{height:120px;resize:vertical;}
+  button{background:#2557a0;color:#fff;border:0;border-radius:4px;padding:8px 18px;font-family:inherit;font-size:13px;margin-top:10px;cursor:pointer;}
+  button:hover{background:#2f68bd;}
+  button.g{background:#2c6b3f;}
+  pre{background:#1a1f26;border:1px solid #2c3540;border-radius:4px;padding:10px;font-size:12px;white-space:pre-wrap;word-break:break-all;min-height:20px;margin:6px 0 0;}
+  .ok{color:#8fd49b;} .bad{color:#e08383;} .hdr{color:#7ab0ff;}
+  .row{display:flex;gap:16px;align-items:flex-end;}
+  .row>div{flex:1;}
+</style>
+</head>
+<body>
+<h1>Value decryptor</h1>
+<div class="sub">AES-128-ECB &middot; Pkcs7 &middot; key = ASCII bytes (Latin1) &mdash; 100% offline, no CDN</div>
+
+<label>Key (ASCII, 16 chars)</label>
+<input id="key" value="" placeholder="paste 16-char key">
+
+<label>Input &mdash; paste a single base64 blob, or a whole JSON / API response / Burp save (it will auto-find "value":"..." entries, and any other base64 string that decrypts cleanly)</label>
+<textarea id="in" placeholder="tIJoDSH6WA1Dr5tJtBZZ0JIY8Gwy...  or  {&quot;value&quot;:&quot;...&quot;}"></textarea>
+<button onclick="run()">Decrypt</button>
+<pre id="out" class="hdr">results appear here</pre>
+
+<div class="row">
+  <div>
+    <label>Encrypt (round-trip) &mdash; plaintext in, prints base64 blob</label>
+    <textarea id="encin" style="height:60px" placeholder="text to encrypt"></textarea>
+    <button class="g" onclick="runEnc()">Encrypt</button>
+    <pre id="encout"></pre>
+  </div>
+</div>
+
+<script>
+// ---------- minimal AES-128 (encrypt+decrypt, ECB) — no libraries ----------
+var SBOX=new Uint8Array(256),INV_SBOX=new Uint8Array(256);
+function xt(a){return ((a<<1)^(a&0x80?0x1b:0))&0xff;}
+function gmul(a,b){var p=0;for(var i=0;i<8;i++){if(b&1)p^=a;a=xt(a);b>>>=1;}return p&0xff;}
+function rotl8(x,n){return ((x<<n)|(x>>>(8-n)))&0xff;}
+(function(){
+  for(var i=0;i<256;i++){
+    var inv=0;
+    if(i!==0){for(var j=1;j<256;j++){if(gmul(i,j)===1){inv=j;break;}}}
+    var s=(inv^rotl8(inv,1)^rotl8(inv,2)^rotl8(inv,3)^rotl8(inv,4)^0x63)&0xff;
+    SBOX[i]=s;INV_SBOX[s]=i;
+  }
+})();
+function expandKey(key){ // 16 bytes -> 176 (11 round keys)
+  var w=new Uint8Array(176);w.set(key),rcon=1;
+  for(var i=4;i<44;i++){
+    var t=[w[(i-1)*4],w[(i-1)*4+1],w[(i-1)*4+2],w[(i-1)*4+3]];
+    if(i%4===0){t=[SBOX[t[1]],SBOX[t[2]],SBOX[t[3]],SBOX[t[0]]];t[0]^=rcon;rcon=xt(rcon);}
+    for(var j=0;j<4;j++)w[i*4+j]=w[(i-4)*4+j]^t[j];
+  }
+  return w;
+}
+function ark(s,w,r){for(var i=0;i<16;i++)s[i]^=w[r*16+i];}
+function subB(s){for(var i=0;i<16;i++)s[i]=SBOX[s[i]];}
+function isubB(s){for(var i=0;i<16;i++)s[i]=INV_SBOX[s[i]];}
+function shR(s){for(var r=1;r<4;r++){var o=[s[r],s[r+4],s[r+8],s[r+12]];for(var c=0;c<4;c++)s[r+4*c]=o[(c+r)%4];}}
+function ishR(s){for(var r=1;r<4;r++){var o=[s[r],s[r+4],s[r+8],s[r+12]];for(var c=0;c<4;c++)s[r+4*c]=o[(c-r+8)%4];}}
+function mixC(s){for(var c=0;c<4;c++){var a=s.slice(4*c,4*c+4);
+  s[4*c+0]=gmul(a[0],2)^gmul(a[1],3)^a[2]^a[3];
+  s[4*c+1]=a[0]^gmul(a[1],2)^gmul(a[2],3)^a[3];
+  s[4*c+2]=a[0]^a[1]^gmul(a[2],2)^gmul(a[3],3);
+  s[4*c+3]=gmul(a[0],3)^a[1]^a[2]^gmul(a[3],2);}}
+function imixC(s){for(var c=0;c<4;c++){var a=s.slice(4*c,4*c+4);
+  s[4*c+0]=gmul(a[0],14)^gmul(a[1],11)^gmul(a[2],13)^gmul(a[3],9);
+  s[4*c+1]=gmul(a[0],9)^gmul(a[1],14)^gmul(a[2],11)^gmul(a[3],13);
+  s[4*c+2]=gmul(a[0],13)^gmul(a[1],9)^gmul(a[2],14)^gmul(a[3],11);
+  s[4*c+3]=gmul(a[0],11)^gmul(a[1],13)^gmul(a[2],9)^gmul(a[3],14);}}
+function encBlock(w,pt){var s=Uint8Array.from(pt);ark(s,w,0);
+  for(var r=1;r<10;r++){subB(s);shR(s);mixC(s);ark(s,w,r);}
+  subB(s);shR(s);ark(s,w,10);return s;}
+function decBlock(w,ct){var s=Uint8Array.from(ct);ark(s,w,10);
+  for(var r=9;r>=1;r--){ishR(s);isubB(s);ark(s,w,r);imixC(s);}
+  ishR(s);isubB(s);ark(s,w,0);return s;}
+
+// ---------- base64 <-> bytes / utf8 ----------
+function b64d(str){var bin=atob(str),u=new Uint8Array(bin.length);for(var i=0;i<bin.length;i++)u[i]=bin.charCodeAt(i);return u;}
+function b64e(u){var s="";for(var i=0;i<u.length;i++)s+=String.fromCharCode(u[i]);return btoa(s);}
+function toStr(u){try{return new TextDecoder("utf-8",{fatal:true}).decode(u);}catch(e){return null;}}
+function fromStr(s){var out=[];for(var i=0;i<s.length;i++){var c=s.codePointAt(i);if(c>0xffff){out.push(c>>10+0xd800>>0?0:0);i++;}out.push(c);}return out;}
+function encStr(s){ // proper UTF-8 encode
+  return new TextEncoder().encode(s);
+}
+function unpad(u){var n=u[u.length-1];if(n>=1&&n<=16){var ok=true;for(var i=0;i<n;i++)if(u[u.length-1-i]!==n)ok=false;if(ok)return u.slice(0,u.length-n);}return u;}
+function pad(u){var n=16-(u.length%16),o=new Uint8Array(u.length+n);o.set(u);for(var i=0;i<n;i++)o[u.length+i]=n;return o;}
+
+// ---------- decrypt / encrypt with key string ----------
+function decryptB64(b64,keyStr){
+  var key=new Uint8Array(16);for(var i=0;i<16;i++)key[i]=i<keyStr.length?keyStr.charCodeAt(i)&0xff:0;
+  var w=expandKey(key),ct=b64d(b64),out=new Uint8Array(ct.length);
+  for(var off=0;off<ct.length;off+=16)out.set(decBlock(w,ct.slice(off,off+16)),off);
+  return unpad(out);
+}
+function encryptToB64(text,keyStr){
+  var key=new Uint8Array(16);for(var i=0;i<16;i++)key[i]=i<keyStr.length?keyStr.charCodeAt(i)&0xff:0;
+  var w=expandKey(key),pt=pad(encStr(text)),out=new Uint8Array(pt.length);
+  for(var off=0;off<pt.length;off+=16)out.set(encBlock(w,pt.slice(off,off+16)),off);
+  return b64e(out);
+}
+function clean(u){ // valid strict UTF-8 and >=95% printable => real plaintext
+  var s=toStr(u);if(s===null||s.length===0)return null;
+  var p=0;for(var i=0;i<s.length;i++){var c=s[i];if(c.isprintable!==undefined){}
+    var cp=s.codePointAt(i);if((cp>=32&&cp<127)||(cp>=160)||c==="\n"||c==="\r"||c==="\t")p++;}
+  return p/s.length>=0.95?s:null;
+}
+
+// ---------- extraction + UI ----------
+var VALUE_RE=/"value"\s*:\s*"([A-Za-z0-9+/=]{16,})"/g;
+var B64_RE=/[A-Za-z0-9+/]{16,}={0,2}/g;
+function run(){
+  var raw=document.getElementById("in").value, key=document.getElementById("key").value;
+  var out=document.getElementById("out"), lines=[], n=0, hit=0;
+  var seen={},list=[];
+  var m;VALUE_RE.lastIndex=0;
+  while((m=VALUE_RE.exec(raw))!==null){if(!seen[m[1]]){seen[m[1]]=1;list.push(m[1]);}}
+  B64_RE.lastIndex=0;
+  while((m=B64_RE.exec(raw))!==null){if(!seen[m[0]]){seen[m[0]]=1;list.push(m[0]);}}
+  if(list.length===0){out.innerHTML='<span class="bad">no base64-looking input found</span>';return;}
+  for(var i=0;i<list.length;i++){
+    var b=list[i];n++;
+    if(b.length%4!==0){continue;}
+    var bytes;try{bytes=b64d(b);}catch(e){continue;}
+    if(bytes.length===0||bytes.length%16!==0)continue;
+    var pt;try{pt=decryptB64(b,key);}catch(e){lines.push('<span class="bad">['+i+'] decrypt error</span>');continue;}
+    var s=clean(pt);
+    if(s!==null){hit++;lines.push('<span class="hdr">['+i+']</span> <span class="ok">'+esc(s)+'</span>');}
+    else lines.push('<span class="bad">['+i+'] not valid with this key</span>');
+  }
+  lines.push('-- '+n+' candidate(s), '+hit+' decrypted cleanly');
+  out.innerHTML=lines.join("\n");
+}
+function runEnc(){
+  var t=document.getElementById("encin").value,key=document.getElementById("key").value;
+  document.getElementById("encout").textContent=encryptToB64(t,key);
+}
+function esc(s){return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
+</script>
+</body>
+</html>
